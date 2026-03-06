@@ -1,9 +1,10 @@
-"""Binance Orderbook实时数据采集器"""
+"""Binance Orderbook采集器抽象基类"""
 import json
 import time
 import threading
 import shutil
 import gc
+from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 import websocket
@@ -11,15 +12,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from logger_config import setup_logger
-from config import (
-    SPOT_SYMBOLS, FUTURES_SYMBOLS,
-    SPOT_WS_URL, FUTURES_WS_URL,
-    SPOT_DATA_DIR, FUTURES_DATA_DIR,
-    DEPTH_LEVEL
-)
 
 
-class OrderbookCollector:
+class BaseOrderbookCollector(ABC):
+    """Orderbook采集器抽象基类，提供WebSocket管理、重连、健康检查、自动保存等共享功能"""
+
     def __init__(self, symbols, ws_url, data_dir, market_type):
         self.symbols = symbols
         self.ws_url = ws_url
@@ -46,23 +43,8 @@ class OrderbookCollector:
         self.last_data_time = {symbol: time.time() for symbol in symbols}
         self.connection_status = {symbol: 'disconnected' for symbol in symbols}
 
-        # Parquet写入配置 - 展开20档orderbook
-        schema_fields = [
-            ('timestamp', pa.int64()),
-            ('symbol', pa.string()),
-            ('market_type', pa.string()),
-        ]
-        # 添加20档bid价格和数量
-        for i in range(1, DEPTH_LEVEL + 1):
-            schema_fields.append((f'bid{i}_price', pa.float64()))
-            schema_fields.append((f'bid{i}_qty', pa.float64()))
-        # 添加20档ask价格和数量
-        for i in range(1, DEPTH_LEVEL + 1):
-            schema_fields.append((f'ask{i}_price', pa.float64()))
-            schema_fields.append((f'ask{i}_qty', pa.float64()))
-        schema_fields.append(('last_update_id', pa.int64()))
-
-        self.schema = pa.schema(schema_fields)
+        # 构建schema（由子类实现）
+        self.schema = self._build_schema()
 
         # 定时保存线程
         self.save_interval = 10  # 每10秒保存一次（1GB内存优化）
@@ -72,51 +54,48 @@ class OrderbookCollector:
         # 内存保护阈值
         self.max_records_per_symbol = 600  # 严格内存限制（1GB VPS）
 
+    @abstractmethod
+    def _build_schema(self):
+        """构建PyArrow schema（由子类实现）"""
+        pass
+
+    @abstractmethod
+    def _parse_message(self, data, symbol):
+        """解析WebSocket消息并返回orderbook记录（由子类实现）"""
+        pass
+
+    @abstractmethod
+    def _get_stream_name(self, symbol):
+        """获取WebSocket stream名称（由子类实现）"""
+        pass
+
     def on_message(self, ws, message):
         """处理WebSocket消息"""
         try:
             data = json.loads(message)
 
-            if 'e' in data and data['e'] == 'depthUpdate':
-                symbol = data['s']
+            # 查找对应的symbol
+            symbol = None
+            for sym, connection in self.ws_connections.items():
+                if connection == ws:
+                    symbol = sym
+                    break
 
-                # 构建展开的orderbook记录
-                orderbook_record = {
-                    'timestamp': data['E'],
-                    'symbol': symbol,
-                    'market_type': self.market_type,
-                }
+            if not symbol:
+                self.logger.warning("无法识别WebSocket连接对应的symbol")
+                return
 
-                # 展开bids（买单）
-                bids = data['b'][:DEPTH_LEVEL]
-                for i in range(DEPTH_LEVEL):
-                    if i < len(bids):
-                        orderbook_record[f'bid{i+1}_price'] = float(bids[i][0])
-                        orderbook_record[f'bid{i+1}_qty'] = float(bids[i][1])
-                    else:
-                        # 如果不足20档，填充0
-                        orderbook_record[f'bid{i+1}_price'] = 0.0
-                        orderbook_record[f'bid{i+1}_qty'] = 0.0
+            # 调用子类实现的解析方法
+            orderbook_record = self._parse_message(data, symbol)
+            if not orderbook_record:
+                return
 
-                # 展开asks（卖单）
-                asks = data['a'][:DEPTH_LEVEL]
-                for i in range(DEPTH_LEVEL):
-                    if i < len(asks):
-                        orderbook_record[f'ask{i+1}_price'] = float(asks[i][0])
-                        orderbook_record[f'ask{i+1}_qty'] = float(asks[i][1])
-                    else:
-                        # 如果不足20档，填充0
-                        orderbook_record[f'ask{i+1}_price'] = 0.0
-                        orderbook_record[f'ask{i+1}_qty'] = 0.0
+            self.orderbook_data[symbol].append(orderbook_record)
+            self.last_data_time[symbol] = time.time()
 
-                orderbook_record['last_update_id'] = data['u']
-
-                self.orderbook_data[symbol].append(orderbook_record)
-                self.last_data_time[symbol] = time.time()
-
-                # 内存保护：如果单个symbol数据超过阈值，记录警告
-                if len(self.orderbook_data[symbol]) > self.max_records_per_symbol:
-                    self.logger.warning(f"{symbol} 内存数据超过 {self.max_records_per_symbol} 条，可能存在保存问题")
+            # 内存保护：如果单个symbol数据超过阈值，记录警告
+            if len(self.orderbook_data[symbol]) > self.max_records_per_symbol:
+                self.logger.warning(f"{symbol} 内存数据超过 {self.max_records_per_symbol} 条，可能存在保存问题")
 
         except Exception as e:
             self.logger.error(f"处理消息错误: {e}", exc_info=True)
@@ -215,7 +194,7 @@ class OrderbookCollector:
 
     def connect_symbol(self, symbol):
         """连接单个交易对的WebSocket"""
-        stream_name = f"{symbol.lower()}@depth20@100ms"
+        stream_name = self._get_stream_name(symbol)
         ws_url = f"{self.ws_url}/{stream_name}"
 
         ws = websocket.WebSocketApp(
@@ -429,3 +408,4 @@ class OrderbookCollector:
             self.logger.error(f"保存剩余数据失败: {e}", exc_info=True)
 
         self.logger.info(f"{self.market_type} 采集器已停止")
+

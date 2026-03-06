@@ -2,7 +2,8 @@
 import signal
 import sys
 import time
-from orderbook_collector import OrderbookCollector
+from spot_orderbook_collector import SpotOrderbookCollector
+from futures_orderbook_collector import FuturesOrderbookCollector
 from funding_rate_collector import FundingRateCollector
 from time_sync import TimeSync
 from logger_config import setup_logger
@@ -53,7 +54,7 @@ if __name__ == "__main__":
         signal.signal(signal.SIGTERM, signal_handler)
 
         # 创建现货采集器
-        spot_collector = OrderbookCollector(
+        spot_collector = SpotOrderbookCollector(
             symbols=SPOT_SYMBOLS,
             ws_url=SPOT_WS_URL,
             data_dir=SPOT_DATA_DIR,
@@ -61,7 +62,7 @@ if __name__ == "__main__":
         )
 
         # 创建合约采集器
-        futures_collector = OrderbookCollector(
+        futures_collector = FuturesOrderbookCollector(
             symbols=FUTURES_SYMBOLS,
             ws_url=FUTURES_WS_URL,
             data_dir=FUTURES_DATA_DIR,
