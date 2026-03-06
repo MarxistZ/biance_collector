@@ -3,9 +3,8 @@ import json
 import time
 import threading
 import shutil
-import gc
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import websocket
 import pandas as pd
@@ -29,8 +28,10 @@ class BaseOrderbookCollector(ABC):
 
         self.orderbook_data = {symbol: [] for symbol in symbols}
         self.ws_connections = {}
+        self.ws_to_symbol = {}
         self.ws_threads = {}
         self.running = False
+        self.data_lock = threading.Lock()
 
         # WebSocket重连配置
         self.max_reconnect_attempts = 10
@@ -48,7 +49,6 @@ class BaseOrderbookCollector(ABC):
 
         # 定时保存线程
         self.save_interval = 10  # 每10秒保存一次（1GB内存优化）
-        self.save_thread = None
         self.auto_save_thread = None
 
         # 内存保护阈值
@@ -69,17 +69,50 @@ class BaseOrderbookCollector(ABC):
         """获取WebSocket stream名称（由子类实现）"""
         pass
 
+    def _get_symbol_by_ws(self, ws):
+        """根据WebSocket对象快速定位symbol"""
+        symbol = self.ws_to_symbol.get(id(ws))
+        if symbol:
+            return symbol
+
+        for sym, connection in self.ws_connections.items():
+            if connection is ws:
+                self.ws_to_symbol[id(ws)] = sym
+                return sym
+        return None
+
+    def _expand_orderbook_side(self, record, side_name, levels, depth_level):
+        """将买卖盘档位展开为固定列"""
+        levels = levels[:depth_level]
+        for i in range(depth_level):
+            if i < len(levels):
+                record[f"{side_name}{i + 1}_price"] = float(levels[i][0])
+                record[f"{side_name}{i + 1}_qty"] = float(levels[i][1])
+            else:
+                record[f"{side_name}{i + 1}_price"] = 0.0
+                record[f"{side_name}{i + 1}_qty"] = 0.0
+
+    def _pop_records(self, symbol):
+        """原子性取出待保存数据，避免保存线程与回调线程并发冲突"""
+        with self.data_lock:
+            records = self.orderbook_data[symbol]
+            if not records:
+                return []
+            self.orderbook_data[symbol] = []
+            return records
+
+    def _requeue_records(self, symbol, records):
+        """保存失败时回填数据，避免临时写入异常导致数据丢失"""
+        if not records:
+            return
+        with self.data_lock:
+            self.orderbook_data[symbol] = records + self.orderbook_data[symbol]
+
     def on_message(self, ws, message):
         """处理WebSocket消息"""
         try:
             data = json.loads(message)
-
-            # 查找对应的symbol
-            symbol = None
-            for sym, connection in self.ws_connections.items():
-                if connection == ws:
-                    symbol = sym
-                    break
+            symbol = self._get_symbol_by_ws(ws)
 
             if not symbol:
                 self.logger.warning("无法识别WebSocket连接对应的symbol")
@@ -90,24 +123,20 @@ class BaseOrderbookCollector(ABC):
             if not orderbook_record:
                 return
 
-            self.orderbook_data[symbol].append(orderbook_record)
+            with self.data_lock:
+                self.orderbook_data[symbol].append(orderbook_record)
+                buffer_size = len(self.orderbook_data[symbol])
             self.last_data_time[symbol] = time.time()
 
-            # 内存保护：如果单个symbol数据超过阈值，记录警告
-            if len(self.orderbook_data[symbol]) > self.max_records_per_symbol:
-                self.logger.warning(f"{symbol} 内存数据超过 {self.max_records_per_symbol} 条，可能存在保存问题")
+            if buffer_size == self.max_records_per_symbol + 1:
+                self.logger.warning(f"{symbol} 内存数据超过 {self.max_records_per_symbol} 条，可能存在保存延迟")
 
         except Exception as e:
             self.logger.error(f"处理消息错误: {e}", exc_info=True)
 
     def on_error(self, ws, error):
         """处理WebSocket错误"""
-        # 查找对应的symbol
-        symbol = None
-        for sym, connection in self.ws_connections.items():
-            if connection == ws:
-                symbol = sym
-                break
+        symbol = self._get_symbol_by_ws(ws)
 
         error_str = str(error)
         self.logger.error(f"WebSocket错误 [{symbol}]: {error_str}")
@@ -124,12 +153,7 @@ class BaseOrderbookCollector(ABC):
 
     def on_close(self, ws, close_status_code, close_msg):
         """WebSocket关闭"""
-        # 查找对应的symbol
-        symbol = None
-        for sym, connection in self.ws_connections.items():
-            if connection == ws:
-                symbol = sym
-                break
+        symbol = self._get_symbol_by_ws(ws)
 
         self.logger.warning(f"WebSocket连接关闭 [{symbol}]: {close_status_code} - {close_msg}")
 
@@ -141,12 +165,7 @@ class BaseOrderbookCollector(ABC):
 
     def on_open(self, ws):
         """WebSocket连接建立"""
-        # 查找对应的symbol
-        symbol = None
-        for sym, connection in self.ws_connections.items():
-            if connection == ws:
-                symbol = sym
-                break
+        symbol = self._get_symbol_by_ws(ws)
 
         if symbol:
             self.connection_status[symbol] = 'connected'
@@ -182,7 +201,7 @@ class BaseOrderbookCollector(ABC):
             if symbol in self.ws_connections:
                 try:
                     self.ws_connections[symbol].close()
-                except:
+                except Exception:
                     pass
 
             # 建立新连接
@@ -205,7 +224,12 @@ class BaseOrderbookCollector(ABC):
             on_open=self.on_open
         )
 
+        old_ws = self.ws_connections.get(symbol)
+        if old_ws is not None:
+            self.ws_to_symbol.pop(id(old_ws), None)
+
         self.ws_connections[symbol] = ws
+        self.ws_to_symbol[id(ws)] = symbol
 
         # 在新线程中运行
         thread = threading.Thread(target=ws.run_forever, name=f"ws_{symbol}")
@@ -232,12 +256,13 @@ class BaseOrderbookCollector(ABC):
             self.logger.error("磁盘空间不足，跳过本次保存")
             return
 
-        current_date = datetime.now().strftime("%Y%m%d")
-        current_hour = datetime.now().strftime("%H")
+        now_utc = datetime.now(timezone.utc)
+        current_date = now_utc.strftime("%Y%m%d")
+        current_hour = now_utc.strftime("%H")
         saved_count = 0
 
         for symbol in self.symbols:
-            records = self.orderbook_data[symbol]
+            records = self._pop_records(symbol)
             if not records:
                 continue
 
@@ -256,16 +281,13 @@ class BaseOrderbookCollector(ABC):
 
                 pq.write_table(table, file_path, compression='snappy')
                 saved_count += len(records)
-                self.orderbook_data[symbol] = []
                 del table
-                gc.collect()
 
             except MemoryError as e:
                 self.logger.critical(f"内存不足，无法保存 {symbol}: {e}")
-                self.orderbook_data[symbol] = []
-                gc.collect()
             except Exception as e:
                 self.logger.error(f"保存 {symbol} 数据失败: {e}", exc_info=True)
+                self._requeue_records(symbol, records)
 
         self.logger.info(f"已保存 {saved_count} 条记录")
 
@@ -300,14 +322,15 @@ class BaseOrderbookCollector(ABC):
                 if symbol in self.ws_connections:
                     try:
                         self.ws_connections[symbol].close()
-                    except:
+                    except Exception:
                         pass
                 self.reconnect_websocket(symbol)
             elif time_since_last_data > 300:  # 5分钟无数据
                 self.logger.warning(f"{symbol} 已 {time_since_last_data:.0f} 秒无数据")
 
         # 输出统计信息
-        total_records = sum(len(records) for records in self.orderbook_data.values())
+        with self.data_lock:
+            total_records = sum(len(records) for records in self.orderbook_data.values())
         self.logger.info(f"健康检查 - 内存中共 {total_records} 条记录，连接状态: {self.connection_status}")
 
     def start(self):
@@ -335,14 +358,15 @@ class BaseOrderbookCollector(ABC):
         self.running = False
 
         # 取消所有重连定时器
-        for timer in self.reconnect_timers.values():
+        for timer in list(self.reconnect_timers.values()):
             if timer.is_alive():
                 timer.cancel()
 
         # 关闭所有WebSocket连接
-        for symbol, ws in self.ws_connections.items():
+        for symbol, ws in list(self.ws_connections.items()):
             try:
                 ws.close()
+                self.ws_to_symbol.pop(id(ws), None)
                 self.logger.debug(f"已关闭 {symbol} WebSocket连接")
             except Exception as e:
                 self.logger.warning(f"关闭 {symbol} WebSocket失败: {e}")
@@ -367,4 +391,3 @@ class BaseOrderbookCollector(ABC):
             self.logger.error(f"保存剩余数据失败: {e}", exc_info=True)
 
         self.logger.info(f"{self.market_type} 采集器已停止")
-

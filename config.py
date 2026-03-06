@@ -1,32 +1,23 @@
 """配置文件"""
+import os
+from pathlib import Path
 
 # 交易对配置
-SPOT_SYMBOLS = [
+DEFAULT_SYMBOLS = [
     "BTCUSDT",
     "ETHUSDT",
     "SOLUSDT",
     "XRPUSDT",
     "DOGEUSDT"
 ]
-
-FUTURES_SYMBOLS = [
-    "BTCUSDT",
-    "ETHUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "DOGEUSDT"
-]
+SPOT_SYMBOLS = DEFAULT_SYMBOLS.copy()
+FUTURES_SYMBOLS = DEFAULT_SYMBOLS.copy()
 
 # WebSocket配置
 SPOT_WS_URL = "wss://stream.binance.com:9443/ws"
 FUTURES_WS_URL = "wss://fstream.binance.com/ws"
 
 # 数据存储配置
-# 生产环境使用 /data 作为数据存储目录（Vultr VPS专用挂载点）
-# 开发环境自动使用本地 ./data 目录
-import os
-from pathlib import Path
-
 if Path("/data").exists() and os.access("/data", os.W_OK):
     DATA_DIR = "/data"
 else:

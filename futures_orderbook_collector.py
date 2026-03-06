@@ -31,56 +31,38 @@ class FuturesOrderbookCollector(BaseOrderbookCollector):
 
     def _parse_message(self, data, symbol):
         """解析Futures depthUpdate消息"""
-        # Futures格式：增量更新，包含事件类型
-        if 'e' not in data or data['e'] != 'depthUpdate':
-            self.logger.warning(f"未知消息格式: {list(data.keys())}")
+        if data.get("e") != "depthUpdate":
             return None
 
-        # 提取所有关键字段
-        timestamp = data['E']                # 事件时间
-        transaction_time = data['T']         # 撮合引擎时间
-        first_update_id = data['U']          # 首个更新ID
-        last_update_id = data['u']           # 最后更新ID
-        prev_update_id = data['pu']          # 前一个更新ID
-        bids = data['b']
-        asks = data['a']
+        required_fields = ("E", "T", "U", "u", "pu", "b", "a")
+        if any(field not in data for field in required_fields):
+            self.logger.warning(f"Futures消息缺少关键字段 [{symbol}]: {list(data.keys())}")
+            return None
 
-        # 构建展开的orderbook记录
-        orderbook_record = {
-            'timestamp': timestamp,
-            'symbol': symbol,
-            'market_type': self.market_type,
-            'transaction_time': transaction_time,
-            'first_update_id': first_update_id,
-            'prev_update_id': prev_update_id,
-        }
+        if not isinstance(data["b"], list) or not isinstance(data["a"], list):
+            self.logger.warning(f"Futures档位格式异常 [{symbol}]")
+            return None
 
-        # 展开bids（买单）
-        bids = bids[:DEPTH_LEVEL]
-        for i in range(DEPTH_LEVEL):
-            if i < len(bids):
-                orderbook_record[f'bid{i+1}_price'] = float(bids[i][0])
-                orderbook_record[f'bid{i+1}_qty'] = float(bids[i][1])
-            else:
-                # 如果不足20档，填充0
-                orderbook_record[f'bid{i+1}_price'] = 0.0
-                orderbook_record[f'bid{i+1}_qty'] = 0.0
+        try:
+            orderbook_record = {
+                "timestamp": int(data["E"]),
+                "symbol": symbol,
+                "market_type": self.market_type,
+                "transaction_time": int(data["T"]),
+                "first_update_id": int(data["U"]),
+                "prev_update_id": int(data["pu"]),
+            }
+            last_update_id = int(data["u"])
+        except (TypeError, ValueError):
+            self.logger.warning(f"Futures消息时间或更新ID格式异常 [{symbol}]")
+            return None
 
-        # 展开asks（卖单）
-        asks = asks[:DEPTH_LEVEL]
-        for i in range(DEPTH_LEVEL):
-            if i < len(asks):
-                orderbook_record[f'ask{i+1}_price'] = float(asks[i][0])
-                orderbook_record[f'ask{i+1}_qty'] = float(asks[i][1])
-            else:
-                # 如果不足20档，填充0
-                orderbook_record[f'ask{i+1}_price'] = 0.0
-                orderbook_record[f'ask{i+1}_qty'] = 0.0
-
-        orderbook_record['last_update_id'] = last_update_id
+        self._expand_orderbook_side(orderbook_record, "bid", data["b"], DEPTH_LEVEL)
+        self._expand_orderbook_side(orderbook_record, "ask", data["a"], DEPTH_LEVEL)
+        orderbook_record["last_update_id"] = last_update_id
 
         return orderbook_record
 
     def _get_stream_name(self, symbol):
         """获取Futures WebSocket stream名称"""
-        return f"{symbol.lower()}@depth20@100ms"
+        return f"{symbol.lower()}@depth{DEPTH_LEVEL}@100ms"

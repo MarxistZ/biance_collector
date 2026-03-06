@@ -24,6 +24,7 @@ def setup_logger(name, log_dir="logs", level=logging.INFO):
     # 创建logger
     logger = logging.getLogger(name)
     logger.setLevel(level)
+    logger.propagate = False
 
     # 避免重复添加handler
     if logger.handlers:

@@ -2,8 +2,7 @@
 import time
 import threading
 import shutil
-import gc
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import requests
 import pandas as pd
@@ -24,6 +23,7 @@ class FundingRateCollector:
         # 改用字典结构，便于按symbol清理
         self.funding_data = {symbol: [] for symbol in symbols}
         self.running = False
+        self.data_lock = threading.Lock()
 
         # Parquet schema
         self.schema = pa.schema([
@@ -42,64 +42,88 @@ class FundingRateCollector:
         self.save_interval = 10  # 每10秒保存一次（1GB内存优化）
 
         self.fetch_thread = None
-        self.save_thread = None
         self.auto_save_thread = None
+        self.session = requests.Session()
 
         # 内存保护阈值
         self.max_records_per_symbol = 600  # 严格内存限制（1GB VPS）
 
+    @staticmethod
+    def _to_float(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _to_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _request_json(self, endpoint, symbol, *, required=False):
+        """请求单个REST接口，处理常见限流/封禁状态码"""
+        url = f"{self.api_base}{endpoint}?symbol={symbol}"
+        response = self.session.get(url, timeout=5)
+        status_code = response.status_code
+
+        if status_code == 200:
+            return response.json()
+        if status_code == 429:
+            self.logger.warning(f"API速率限制 (429) [{symbol}]，等待60秒")
+            time.sleep(60)
+            return None
+        if status_code == 418:
+            self.logger.critical(f"IP被封禁 (418) [{symbol}]，等待10分钟")
+            time.sleep(600)
+            return None
+
+        message = f"API请求失败 [{symbol}] {endpoint}: HTTP {status_code}"
+        if required:
+            self.logger.error(message)
+        else:
+            self.logger.warning(message)
+        return None
+
+    def _pop_records(self, symbol):
+        with self.data_lock:
+            records = self.funding_data[symbol]
+            if not records:
+                return []
+            self.funding_data[symbol] = []
+            return records
+
+    def _requeue_records(self, symbol, records):
+        if not records:
+            return
+        with self.data_lock:
+            self.funding_data[symbol] = records + self.funding_data[symbol]
+
     def fetch_funding_rate(self, symbol):
         """获取单个交易对的资金费率和相关数据"""
         try:
-            # 获取资金费率
-            premium_url = f"{self.api_base}/fapi/v1/premiumIndex?symbol={symbol}"
-            premium_resp = requests.get(premium_url, timeout=5)
-
-            # 处理HTTP错误
-            if premium_resp.status_code == 429:
-                self.logger.warning(f"API速率限制 (429)，等待60秒")
-                time.sleep(60)
-                return None
-            elif premium_resp.status_code == 418:
-                self.logger.critical(f"IP被封禁 (418)，等待10分钟")
-                time.sleep(600)
-                return None
-            elif premium_resp.status_code >= 400:
-                self.logger.error(f"API请求失败 [{symbol}]: HTTP {premium_resp.status_code}")
+            premium_data = self._request_json("/fapi/v1/premiumIndex", symbol, required=True)
+            if not premium_data:
                 return None
 
-            premium_data = premium_resp.json()
+            server_time = premium_data.get("time")
+            if server_time is None:
+                self.logger.warning(f"资金费率返回缺少time字段 [{symbol}]")
+                return None
 
-            # 获取24h交易量
-            ticker_url = f"{self.api_base}/fapi/v1/ticker/24hr?symbol={symbol}"
-            ticker_resp = requests.get(ticker_url, timeout=5)
-            if ticker_resp.status_code != 200:
-                self.logger.warning(f"获取24h交易量失败 [{symbol}]: HTTP {ticker_resp.status_code}")
-                ticker_data = {}
-            else:
-                ticker_data = ticker_resp.json()
-
-            # 获取未平仓合约量
-            oi_url = f"{self.api_base}/fapi/v1/openInterest?symbol={symbol}"
-            oi_resp = requests.get(oi_url, timeout=5)
-            if oi_resp.status_code != 200:
-                self.logger.warning(f"获取未平仓合约量失败 [{symbol}]: HTTP {oi_resp.status_code}")
-                oi_data = {}
-            else:
-                oi_data = oi_resp.json()
-
-            # 使用Binance服务器时间戳，确保与orderbook时间对齐
-            server_time = int(premium_data.get('time', int(time.time() * 1000)))
+            ticker_data = self._request_json("/fapi/v1/ticker/24hr", symbol) or {}
+            oi_data = self._request_json("/fapi/v1/openInterest", symbol) or {}
 
             record = {
-                'timestamp': server_time,
-                'symbol': symbol,
-                'funding_rate': float(premium_data.get('lastFundingRate', 0)),
-                'mark_price': float(premium_data.get('markPrice', 0)),
-                'index_price': float(premium_data.get('indexPrice', 0)),
-                'next_funding_time': int(premium_data.get('nextFundingTime', 0)),
-                'open_interest': float(oi_data.get('openInterest', 0)),
-                'volume_24h': float(ticker_data.get('volume', 0))
+                "timestamp": self._to_int(server_time),
+                "symbol": symbol,
+                "funding_rate": self._to_float(premium_data.get("lastFundingRate")),
+                "mark_price": self._to_float(premium_data.get("markPrice")),
+                "index_price": self._to_float(premium_data.get("indexPrice")),
+                "next_funding_time": self._to_int(premium_data.get("nextFundingTime")),
+                "open_interest": self._to_float(oi_data.get("openInterest")),
+                "volume_24h": self._to_float(ticker_data.get("volume")),
             }
 
             return record
@@ -117,21 +141,26 @@ class FundingRateCollector:
     def fetch_loop(self):
         """定时获取资金费率"""
         while self.running:
+            cycle_start = time.time()
             for symbol in self.symbols:
                 if not self.running:
                     break
 
                 record = self.fetch_funding_rate(symbol)
                 if record:
-                    self.funding_data[symbol].append(record)
+                    with self.data_lock:
+                        self.funding_data[symbol].append(record)
+                        buffer_size = len(self.funding_data[symbol])
 
-                    # 内存保护
-                    if len(self.funding_data[symbol]) > self.max_records_per_symbol:
-                        self.logger.warning(f"{symbol} 资金费率数据超过 {self.max_records_per_symbol} 条")
+                    if buffer_size == self.max_records_per_symbol + 1:
+                        self.logger.warning(f"{symbol} 资金费率缓存超过 {self.max_records_per_symbol} 条")
 
                 time.sleep(0.1)  # 避免请求过快
 
-            time.sleep(self.fetch_interval)
+            elapsed = time.time() - cycle_start
+            sleep_seconds = max(0.0, self.fetch_interval - elapsed)
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
 
     def _check_disk_space(self):
         """检查磁盘可用空间"""
@@ -152,12 +181,13 @@ class FundingRateCollector:
             self.logger.error("磁盘空间不足，跳过本次保存")
             return
 
-        current_date = datetime.now().strftime("%Y%m%d")
-        current_hour = datetime.now().strftime("%H")
+        now_utc = datetime.now(timezone.utc)
+        current_date = now_utc.strftime("%Y%m%d")
+        current_hour = now_utc.strftime("%H")
         saved_count = 0
 
         for symbol in self.symbols:
-            records = self.funding_data[symbol]
+            records = self._pop_records(symbol)
             if not records:
                 continue
 
@@ -176,16 +206,13 @@ class FundingRateCollector:
 
                 pq.write_table(table, file_path, compression='snappy')
                 saved_count += len(records)
-                self.funding_data[symbol] = []
                 del table
-                gc.collect()
 
             except MemoryError as e:
                 self.logger.critical(f"内存不足，无法保存 {symbol} 资金费率: {e}")
-                self.funding_data[symbol] = []
-                gc.collect()
             except Exception as e:
                 self.logger.error(f"保存 {symbol} 数据失败: {e}", exc_info=True)
+                self._requeue_records(symbol, records)
 
         self.logger.info(f"已保存 {saved_count} 条资金费率记录")
 
@@ -239,4 +266,5 @@ class FundingRateCollector:
         except Exception as e:
             self.logger.error(f"保存剩余数据失败: {e}", exc_info=True)
 
+        self.session.close()
         self.logger.info("资金费率采集器已停止")
