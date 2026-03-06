@@ -21,19 +21,26 @@ cd /opt
 git clone <repo-url> binance_collector
 cd binance_collector
 
-# 3. 安装依赖
+# 3. 创建Python虚拟环境（推荐）
+python3 -m venv venv
+source venv/bin/activate
+
+# 4. 安装依赖
 pip3 install -r requirements.txt
 
-# 4. 设置执行权限
+# 5. 设置执行权限
 chmod +x *.sh
 
-# 5. 安装systemd服务
+# 6. 配置systemd服务使用venv
+sed -i 's|ExecStart=/usr/bin/python3|ExecStart=/opt/binance_collector/venv/bin/python3|' binance-collector.service
+
+# 7. 安装systemd服务
 cp binance-collector.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable binance-collector
 systemctl start binance-collector
 
-# 6. 验证运行状态
+# 8. 验证运行状态
 systemctl status binance-collector
 journalctl -u binance-collector -f
 ```
@@ -61,11 +68,38 @@ journalctl -u binance-collector -f
 
 ## 安装依赖
 
+**推荐：使用Python虚拟环境**
+
+```bash
+# 创建虚拟环境
+python3 -m venv venv
+
+# 激活虚拟环境
+source venv/bin/activate
+
+# 安装依赖
+pip install -r requirements.txt
+```
+
+**或者：全局安装（不推荐）**
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ## 运行
+
+**如果使用虚拟环境：**
+
+```bash
+# 激活虚拟环境
+source venv/bin/activate
+
+# 运行程序
+python main.py
+```
+
+**如果全局安装：**
 
 ```bash
 python main.py

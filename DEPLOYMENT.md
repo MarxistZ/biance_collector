@@ -54,6 +54,27 @@ cd binance_collector
 
 **2. 安装Python依赖**
 
+有两种方式安装依赖：
+
+**方式A：使用Python虚拟环境（推荐）**
+
+```bash
+# 创建虚拟环境
+cd /opt/binance_collector
+sudo python3 -m venv venv
+
+# 激活虚拟环境
+source venv/bin/activate
+
+# 安装依赖
+pip3 install -r requirements.txt
+
+# 退出虚拟环境（可选）
+deactivate
+```
+
+**方式B：全局安装（简单但不推荐）**
+
 ```bash
 sudo pip3 install -r requirements.txt
 ```
@@ -73,13 +94,23 @@ grep DATA_DIR /opt/binance_collector/config.py
 
 # 测试数据目录可写性
 sudo touch /data/test && sudo rm /data/test && echo "OK"
+
+# 如果使用了venv，验证依赖安装
+/opt/binance_collector/venv/bin/pip3 list | grep websocket
+# 应该显示: websocket-client  1.6.4
 ```
 
 **5. 测试运行**
 
 ```bash
 cd /opt/binance_collector
+
+# 如果使用venv
+/opt/binance_collector/venv/bin/python3 main.py
+
+# 如果全局安装
 sudo python3 main.py
+
 # 等待30秒后按Ctrl+C停止
 
 # 检查是否生成数据文件
@@ -89,6 +120,13 @@ ls -lh /data/spot/BTCUSDT/$(date +%Y%m%d)/
 **6. 安装systemd服务**
 
 ```bash
+# 如果使用venv，需要修改service文件
+# 编辑 /opt/binance_collector/binance-collector.service
+# 将 ExecStart=/usr/bin/python3 改为 ExecStart=/opt/binance_collector/venv/bin/python3
+
+# 如果使用venv，修改ExecStart
+sudo sed -i 's|ExecStart=/usr/bin/python3|ExecStart=/opt/binance_collector/venv/bin/python3|' /opt/binance_collector/binance-collector.service
+
 # 复制服务文件
 sudo cp /opt/binance_collector/binance-collector.service /etc/systemd/system/
 
@@ -175,6 +213,170 @@ sudo sed -i 's/Group=root/Group=binance/' /etc/systemd/system/binance-collector.
 # 重载并重启服务
 sudo systemctl daemon-reload
 sudo systemctl restart binance-collector
+```
+
+---
+
+## Python虚拟环境部署说明
+
+### 为什么使用venv？
+
+Python虚拟环境（venv）提供以下优势：
+- 隔离项目依赖，避免与系统Python包冲突
+- 便于管理不同项目的依赖版本
+- 符合Python最佳实践
+- 不污染系统Python环境
+
+### venv vs 全局安装对比
+
+| 特性 | venv虚拟环境 | 全局安装 |
+|------|-------------|---------|
+| 依赖隔离 | ✅ 完全隔离 | ❌ 可能冲突 |
+| 系统安全 | ✅ 不影响系统 | ⚠️ 可能影响系统包 |
+| 多项目支持 | ✅ 每个项目独立 | ❌ 版本冲突风险 |
+| 部署复杂度 | ⚠️ 稍复杂 | ✅ 简单 |
+
+### 创建和使用venv
+
+**1. 创建虚拟环境**
+
+```bash
+cd /opt/binance_collector
+sudo python3 -m venv venv
+```
+
+**2. 激活虚拟环境**
+
+```bash
+source /opt/binance_collector/venv/bin/activate
+# 激活后，命令提示符会显示 (venv)
+```
+
+**3. 安装依赖**
+
+```bash
+# 在激活的venv中
+pip3 install -r requirements.txt
+
+# 验证安装
+pip3 list | grep websocket
+```
+
+**4. 运行程序**
+
+有两种方式：
+
+```bash
+# 方式A：激活venv后运行
+source /opt/binance_collector/venv/bin/activate
+python3 main.py
+
+# 方式B：直接使用venv中的python（推荐用于脚本和systemd）
+/opt/binance_collector/venv/bin/python3 main.py
+```
+
+**5. 退出虚拟环境**
+
+```bash
+deactivate
+```
+
+### systemd服务配置（venv）
+
+修改`binance-collector.service`文件中的`ExecStart`：
+
+```ini
+# 使用venv中的Python
+ExecStart=/opt/binance_collector/venv/bin/python3 /opt/binance_collector/main.py
+```
+
+完整配置示例：
+
+```bash
+# 自动修改service文件
+sudo sed -i 's|ExecStart=/usr/bin/python3|ExecStart=/opt/binance_collector/venv/bin/python3|' /opt/binance_collector/binance-collector.service
+
+# 复制到systemd目录
+sudo cp /opt/binance_collector/binance-collector.service /etc/systemd/system/
+
+# 重载并启动
+sudo systemctl daemon-reload
+sudo systemctl restart binance-collector
+sudo systemctl status binance-collector
+```
+
+### 常见问题排查
+
+**问题1：ModuleNotFoundError: No module named 'websocket'**
+
+**原因：** 使用了系统Python而非venv中的Python
+
+**解决方案：**
+
+```bash
+# 检查当前使用的Python
+which python3
+# 如果显示 /usr/bin/python3，说明没有使用venv
+
+# 方法A：激活venv
+source /opt/binance_collector/venv/bin/activate
+which python3  # 应该显示 /opt/binance_collector/venv/bin/python3
+
+# 方法B：直接使用venv的python
+/opt/binance_collector/venv/bin/python3 main.py
+```
+
+**问题2：sudo python3运行时找不到模块**
+
+**原因：** `sudo`会使用系统Python，而不是venv中的Python
+
+**解决方案：**
+
+```bash
+# 不要使用 sudo python3
+# 而是直接指定venv中的python路径
+/opt/binance_collector/venv/bin/python3 main.py
+
+# 或者使用sudo时指定完整路径
+sudo /opt/binance_collector/venv/bin/python3 main.py
+```
+
+**问题3：systemd服务启动失败**
+
+**检查步骤：**
+
+```bash
+# 1. 验证venv中的依赖
+/opt/binance_collector/venv/bin/pip3 list | grep websocket
+
+# 2. 手动测试运行
+/opt/binance_collector/venv/bin/python3 /opt/binance_collector/main.py
+
+# 3. 检查service文件配置
+grep ExecStart /etc/systemd/system/binance-collector.service
+# 应该显示: ExecStart=/opt/binance_collector/venv/bin/python3 ...
+
+# 4. 查看详细错误日志
+sudo journalctl -u binance-collector -n 50 --no-pager
+```
+
+### 验证venv部署
+
+```bash
+# 1. 检查venv目录
+ls -la /opt/binance_collector/venv/bin/python3
+
+# 2. 验证依赖安装
+/opt/binance_collector/venv/bin/pip3 list
+
+# 3. 测试导入模块
+/opt/binance_collector/venv/bin/python3 -c "import websocket; print('OK')"
+
+# 4. 检查systemd服务
+sudo systemctl status binance-collector
+
+# 5. 查看运行日志
+sudo journalctl -u binance-collector -n 20
 ```
 
 ---

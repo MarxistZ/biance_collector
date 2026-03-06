@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Vultr VPS部署配置：使用root用户，应用安装在/opt/binance_collector
+# 支持Python虚拟环境：如果使用venv，将ExecStart改为 /opt/binance_collector/venv/bin/python3
 User=root
 Group=root
 WorkingDirectory=/opt/binance_collector
