@@ -133,7 +133,7 @@ class FundingRateCollector:
 
             time.sleep(self.fetch_interval)
 
-    def check_disk_space(self):
+    def _check_disk_space(self):
         """检查磁盘可用空间"""
         try:
             stat = shutil.disk_usage(self.data_dir)
@@ -146,89 +146,48 @@ class FundingRateCollector:
             self.logger.error(f"检查磁盘空间失败: {e}")
             return True
 
-    def get_memory_usage_mb(self):
-        """获取当前进程内存使用（MB）"""
-        try:
-            import psutil
-            import os
-            process = psutil.Process(os.getpid())
-            return process.memory_info().rss / 1024 / 1024
-        except ImportError:
-            # psutil未安装时返回0，避免报错
-            return 0
-
     def save_to_parquet(self):
-        """保存数据到Parquet文件（内存优化版本）"""
-        # 检查磁盘空间
-        if not self.check_disk_space():
+        """保存数据到Parquet文件"""
+        if not self._check_disk_space():
             self.logger.error("磁盘空间不足，跳过本次保存")
             return
-
-        # 记录保存前内存使用
-        try:
-            mem_before = self.get_memory_usage_mb()
-        except:
-            mem_before = 0
 
         current_date = datetime.now().strftime("%Y%m%d")
         current_hour = datetime.now().strftime("%H")
         saved_count = 0
 
-        # 逐个symbol保存，避免内存峰值
         for symbol in self.symbols:
             records = self.funding_data[symbol]
             if not records:
                 continue
 
             try:
-                # 创建DataFrame
                 df = pd.DataFrame(records)
-
-                # 文件路径
                 symbol_dir = self.data_dir / symbol / current_date
                 symbol_dir.mkdir(parents=True, exist_ok=True)
                 file_path = symbol_dir / f"funding_rate_{current_hour}.parquet"
 
-                # 转换为PyArrow Table
                 table = pa.Table.from_pandas(df, schema=self.schema)
-
-                # 立即释放DataFrame内存
                 del df
 
-                # 追加模式写入
                 if file_path.exists():
                     existing_table = pq.read_table(file_path)
                     table = pa.concat_tables([existing_table, table])
 
                 pq.write_table(table, file_path, compression='snappy')
-
-                file_size = file_path.stat().st_size / 1024  # KB
                 saved_count += len(records)
-
-                # 保存成功后才清空数据
                 self.funding_data[symbol] = []
-
-                # 立即释放table内存
                 del table
-
-                # 强制垃圾回收
                 gc.collect()
 
             except MemoryError as e:
                 self.logger.critical(f"内存不足，无法保存 {symbol} 资金费率: {e}")
-                # 内存不足时，清空当前symbol数据避免持续OOM
                 self.funding_data[symbol] = []
                 gc.collect()
             except Exception as e:
                 self.logger.error(f"保存 {symbol} 数据失败: {e}", exc_info=True)
-                # 不清空数据，下次继续尝试保存
 
-        # 记录保存后内存使用
-        try:
-            mem_after = self.get_memory_usage_mb()
-            self.logger.info(f"已保存 {saved_count} 条资金费率记录，内存: {mem_before:.1f}MB -> {mem_after:.1f}MB")
-        except:
-            self.logger.info(f"已保存 {saved_count} 条资金费率记录")
+        self.logger.info(f"已保存 {saved_count} 条资金费率记录")
 
     def auto_save_loop(self):
         """自动保存循环"""
