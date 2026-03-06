@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import shutil
+import gc
 from datetime import datetime
 from pathlib import Path
 import websocket
@@ -45,23 +46,31 @@ class OrderbookCollector:
         self.last_data_time = {symbol: time.time() for symbol in symbols}
         self.connection_status = {symbol: 'disconnected' for symbol in symbols}
 
-        # Parquet写入配置
-        self.schema = pa.schema([
+        # Parquet写入配置 - 展开20档orderbook
+        schema_fields = [
             ('timestamp', pa.int64()),
             ('symbol', pa.string()),
             ('market_type', pa.string()),
-            ('bids', pa.string()),
-            ('asks', pa.string()),
-            ('last_update_id', pa.int64())
-        ])
+        ]
+        # 添加20档bid价格和数量
+        for i in range(1, DEPTH_LEVEL + 1):
+            schema_fields.append((f'bid{i}_price', pa.float64()))
+            schema_fields.append((f'bid{i}_qty', pa.float64()))
+        # 添加20档ask价格和数量
+        for i in range(1, DEPTH_LEVEL + 1):
+            schema_fields.append((f'ask{i}_price', pa.float64()))
+            schema_fields.append((f'ask{i}_qty', pa.float64()))
+        schema_fields.append(('last_update_id', pa.int64()))
+
+        self.schema = pa.schema(schema_fields)
 
         # 定时保存线程
-        self.save_interval = 60  # 每60秒保存一次
+        self.save_interval = 10  # 每10秒保存一次（1GB内存优化）
         self.save_thread = None
         self.auto_save_thread = None
 
         # 内存保护阈值
-        self.max_records_per_symbol = 10000
+        self.max_records_per_symbol = 600  # 严格内存限制（1GB VPS）
 
     def on_message(self, ws, message):
         """处理WebSocket消息"""
@@ -71,14 +80,36 @@ class OrderbookCollector:
             if 'e' in data and data['e'] == 'depthUpdate':
                 symbol = data['s']
 
+                # 构建展开的orderbook记录
                 orderbook_record = {
                     'timestamp': data['E'],
                     'symbol': symbol,
                     'market_type': self.market_type,
-                    'bids': json.dumps(data['b'][:DEPTH_LEVEL]),
-                    'asks': json.dumps(data['a'][:DEPTH_LEVEL]),
-                    'last_update_id': data['u']
                 }
+
+                # 展开bids（买单）
+                bids = data['b'][:DEPTH_LEVEL]
+                for i in range(DEPTH_LEVEL):
+                    if i < len(bids):
+                        orderbook_record[f'bid{i+1}_price'] = float(bids[i][0])
+                        orderbook_record[f'bid{i+1}_qty'] = float(bids[i][1])
+                    else:
+                        # 如果不足20档，填充0
+                        orderbook_record[f'bid{i+1}_price'] = 0.0
+                        orderbook_record[f'bid{i+1}_qty'] = 0.0
+
+                # 展开asks（卖单）
+                asks = data['a'][:DEPTH_LEVEL]
+                for i in range(DEPTH_LEVEL):
+                    if i < len(asks):
+                        orderbook_record[f'ask{i+1}_price'] = float(asks[i][0])
+                        orderbook_record[f'ask{i+1}_qty'] = float(asks[i][1])
+                    else:
+                        # 如果不足20档，填充0
+                        orderbook_record[f'ask{i+1}_price'] = 0.0
+                        orderbook_record[f'ask{i+1}_qty'] = 0.0
+
+                orderbook_record['last_update_id'] = data['u']
 
                 self.orderbook_data[symbol].append(orderbook_record)
                 self.last_data_time[symbol] = time.time()
@@ -216,17 +247,37 @@ class OrderbookCollector:
             self.logger.error(f"检查磁盘空间失败: {e}")
             return True  # 检查失败时假设空间充足，避免阻塞保存
 
+    def get_memory_usage_mb(self):
+        """获取当前进程内存使用（MB）"""
+        try:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            return process.memory_info().rss / 1024 / 1024
+        except ImportError:
+            # psutil未安装时返回0，避免报错
+            return 0
+
     def save_to_parquet(self):
-        """保存数据到Parquet文件"""
+        """保存数据到Parquet文件（内存优化版本）"""
         # 检查磁盘空间
         if not self.check_disk_space():
             self.logger.error("磁盘空间不足，跳过本次保存")
             return
 
+        # 记录保存前内存使用
+        try:
+            mem_before = self.get_memory_usage_mb()
+        except:
+            mem_before = 0
+
         current_date = datetime.now().strftime("%Y%m%d")
         current_hour = datetime.now().strftime("%H")
+        saved_count = 0
 
-        for symbol, records in self.orderbook_data.items():
+        # 逐个symbol保存，避免内存峰值
+        for symbol in self.symbols:
+            records = self.orderbook_data[symbol]
             if not records:
                 continue
 
@@ -234,14 +285,16 @@ class OrderbookCollector:
                 # 创建DataFrame
                 df = pd.DataFrame(records)
 
-                # 文件路径: data/spot/BTCUSDT/20240307/orderbook_14.parquet
+                # 文件路径
                 symbol_dir = self.data_dir / symbol / current_date
                 symbol_dir.mkdir(parents=True, exist_ok=True)
-
                 file_path = symbol_dir / f"orderbook_{current_hour}.parquet"
 
                 # 转换为PyArrow Table
                 table = pa.Table.from_pandas(df, schema=self.schema)
+
+                # 立即释放DataFrame内存
+                del df
 
                 # 追加模式写入
                 if file_path.exists():
@@ -251,14 +304,32 @@ class OrderbookCollector:
                 pq.write_table(table, file_path, compression='snappy')
 
                 file_size = file_path.stat().st_size / 1024  # KB
-                self.logger.info(f"已保存 {len(records)} 条记录到 {file_path} ({file_size:.1f} KB)")
+                saved_count += len(records)
 
                 # 保存成功后才清空数据
                 self.orderbook_data[symbol] = []
 
+                # 立即释放table内存
+                del table
+
+                # 强制垃圾回收
+                gc.collect()
+
+            except MemoryError as e:
+                self.logger.critical(f"内存不足，无法保存 {symbol}: {e}")
+                # 内存不足时，清空当前symbol数据避免持续OOM
+                self.orderbook_data[symbol] = []
+                gc.collect()
             except Exception as e:
                 self.logger.error(f"保存 {symbol} 数据失败: {e}", exc_info=True)
                 # 不清空数据，下次继续尝试保存
+
+        # 记录保存后内存使用
+        try:
+            mem_after = self.get_memory_usage_mb()
+            self.logger.info(f"已保存 {saved_count} 条记录，内存: {mem_before:.1f}MB -> {mem_after:.1f}MB")
+        except:
+            self.logger.info(f"已保存 {saved_count} 条记录")
 
     def auto_save_loop(self):
         """自动保存循环，包含健康检查"""
