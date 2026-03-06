@@ -184,7 +184,7 @@ class OrderbookCollector:
 
     def connect_symbol(self, symbol):
         """连接单个交易对的WebSocket"""
-        stream_name = f"{symbol.lower()}@depth@100ms"
+        stream_name = f"{symbol.lower()}@depth20@100ms"
         ws_url = f"{self.ws_url}/{stream_name}"
 
         ws = websocket.WebSocketApp(
