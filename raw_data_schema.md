@@ -54,7 +54,7 @@ data/
 
 | 字段名称 | 类型 (PyArrow) | 描述 |
 | :--- | :--- | :--- |
-| `timestamp` | `int64` | websocket事件时间戳 (`E` 字段) |
+| `timestamp` | `int64` | 本地接收时间戳（Spot partial depth stream 不提供服务端事件时间，与 `local_timestamp` 相同） |
 | `local_timestamp` | `int64` | 本机实际接收到该条数据的 UTC 毫秒时间戳 |
 | `symbol` | `string` | 对应的交易对，如 `BTCUSDT` |
 | `market_type` | `string` | 固定值 `"spot"` |

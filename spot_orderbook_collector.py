@@ -30,8 +30,8 @@ class SpotOrderbookCollector(BaseOrderbookCollector):
         return pa.schema(schema_fields)
 
     def _parse_message(self, data, symbol):
-        """解析Spot depth snapshot消息"""
-        required_fields = ("E", "lastUpdateId", "bids", "asks")
+        """解析Spot partial book depth消息"""
+        required_fields = ("lastUpdateId", "bids", "asks")
         if any(field not in data for field in required_fields):
             self.logger.warning(f"Spot消息缺少关键字段: {list(data.keys())}")
             return None
@@ -41,19 +41,20 @@ class SpotOrderbookCollector(BaseOrderbookCollector):
             return None
 
         try:
-            timestamp = int(data["E"])
             last_update_id = int(data["lastUpdateId"])
         except (TypeError, ValueError):
-            self.logger.warning(f"Spot消息时间或更新ID格式异常 [{symbol}]")
+            self.logger.warning(f"Spot消息更新ID格式异常 [{symbol}]")
             return None
-        first_update_id = last_update_id
+
+        # Spot partial depth stream 不提供服务端时间戳，使用本地时间
+        local_ts = int(time.time() * 1000)
 
         orderbook_record = {
-            "timestamp": timestamp,
-            "local_timestamp": int(time.time() * 1000),
+            "timestamp": local_ts,
+            "local_timestamp": local_ts,
             "symbol": symbol,
             "market_type": self.market_type,
-            "first_update_id": first_update_id,
+            "first_update_id": last_update_id,
         }
 
         self._expand_orderbook_side(orderbook_record, "bid", data["bids"], DEPTH_LEVEL)
