@@ -1,4 +1,5 @@
 """Binance合约市场Orderbook采集器"""
+import time
 import pyarrow as pa
 from base_orderbook_collector import BaseOrderbookCollector
 from config import DEPTH_LEVEL
@@ -8,14 +9,15 @@ class FuturesOrderbookCollector(BaseOrderbookCollector):
     """合约市场Orderbook采集器，处理depthUpdate格式"""
 
     def _build_schema(self):
-        """构建Futures Orderbook Schema (87列)"""
+        """构建Futures Orderbook Schema (88列)"""
         schema_fields = [
             ('timestamp', pa.int64()),
+            ('local_timestamp', pa.int64()),
             ('symbol', pa.string()),
             ('market_type', pa.string()),
-            ('transaction_time', pa.int64()),  # 新增：撮合引擎时间T
-            ('first_update_id', pa.int64()),   # 新增：首个更新ID U
-            ('prev_update_id', pa.int64()),    # 新增：前一个更新ID pu
+            ('transaction_time', pa.int64()),
+            ('first_update_id', pa.int64()),
+            ('prev_update_id', pa.int64()),
         ]
         # 添加20档bid价格和数量
         for i in range(1, DEPTH_LEVEL + 1):
@@ -46,6 +48,7 @@ class FuturesOrderbookCollector(BaseOrderbookCollector):
         try:
             orderbook_record = {
                 "timestamp": int(data["E"]),
+                "local_timestamp": int(time.time() * 1000),
                 "symbol": symbol,
                 "market_type": self.market_type,
                 "transaction_time": int(data["T"]),

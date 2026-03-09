@@ -28,6 +28,7 @@ class FundingRateCollector:
         # Parquet schema
         self.schema = pa.schema([
             ('timestamp', pa.int64()),
+            ('local_timestamp', pa.int64()),
             ('symbol', pa.string()),
             ('funding_rate', pa.float64()),
             ('mark_price', pa.float64()),
@@ -72,11 +73,17 @@ class FundingRateCollector:
             return response.json()
         if status_code == 429:
             self.logger.warning(f"API速率限制 (429) [{symbol}]，等待60秒")
-            time.sleep(60)
+            for _ in range(120):
+                if not self.running:
+                    return None
+                time.sleep(0.5)
             return None
         if status_code == 418:
             self.logger.critical(f"IP被封禁 (418) [{symbol}]，等待10分钟")
-            time.sleep(600)
+            for _ in range(1200):
+                if not self.running:
+                    return None
+                time.sleep(0.5)
             return None
 
         message = f"API请求失败 [{symbol}] {endpoint}: HTTP {status_code}"
@@ -117,6 +124,7 @@ class FundingRateCollector:
 
             record = {
                 "timestamp": self._to_int(server_time),
+                "local_timestamp": int(time.time() * 1000),
                 "symbol": symbol,
                 "funding_rate": self._to_float(premium_data.get("lastFundingRate")),
                 "mark_price": self._to_float(premium_data.get("markPrice")),
@@ -182,8 +190,7 @@ class FundingRateCollector:
             return
 
         now_utc = datetime.now(timezone.utc)
-        current_date = now_utc.strftime("%Y%m%d")
-        current_hour = now_utc.strftime("%H")
+        current_date_hour = now_utc.strftime("%Y%m%d%H")
         saved_count = 0
 
         for symbol in self.symbols:
@@ -193,9 +200,9 @@ class FundingRateCollector:
 
             try:
                 df = pd.DataFrame(records)
-                symbol_dir = self.data_dir / symbol / current_date
+                symbol_dir = self.data_dir / symbol
                 symbol_dir.mkdir(parents=True, exist_ok=True)
-                file_path = symbol_dir / f"funding_rate_{current_hour}.parquet"
+                file_path = symbol_dir / f"funding_{symbol}_{current_date_hour}.parquet"
 
                 table = pa.Table.from_pandas(df, schema=self.schema)
                 del df
@@ -204,7 +211,9 @@ class FundingRateCollector:
                     existing_table = pq.read_table(file_path)
                     table = pa.concat_tables([existing_table, table])
 
-                pq.write_table(table, file_path, compression='snappy')
+                tmp_path = file_path.with_suffix('.parquet.tmp')
+                pq.write_table(table, tmp_path, compression='snappy')
+                tmp_path.rename(file_path)
                 saved_count += len(records)
                 del table
 

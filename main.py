@@ -5,7 +5,6 @@ import time
 from spot_orderbook_collector import SpotOrderbookCollector
 from futures_orderbook_collector import FuturesOrderbookCollector
 from funding_rate_collector import FundingRateCollector
-from time_sync import TimeSync
 from logger_config import setup_logger
 from config import (
     SPOT_SYMBOLS, FUTURES_SYMBOLS,
@@ -44,13 +43,6 @@ def main():
     logger.info("=" * 60)
 
     try:
-        # 时间同步
-        time_sync = TimeSync()
-        logger.info("正在同步服务器时间...")
-        if not time_sync.sync_time():
-            logger.critical("时间同步失败，程序退出")
-            sys.exit(1)
-
         # 注册信号处理（在创建采集器之前）
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)

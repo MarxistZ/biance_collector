@@ -257,9 +257,10 @@ class BaseOrderbookCollector(ABC):
             return
 
         now_utc = datetime.now(timezone.utc)
-        current_date = now_utc.strftime("%Y%m%d")
-        current_hour = now_utc.strftime("%H")
+        current_date_hour = now_utc.strftime("%Y%m%d%H")
         saved_count = 0
+        
+        prefix = "future" if self.market_type == "futures" else "spot"
 
         for symbol in self.symbols:
             records = self._pop_records(symbol)
@@ -268,9 +269,9 @@ class BaseOrderbookCollector(ABC):
 
             try:
                 df = pd.DataFrame(records)
-                symbol_dir = self.data_dir / symbol / current_date
+                symbol_dir = self.data_dir / symbol
                 symbol_dir.mkdir(parents=True, exist_ok=True)
-                file_path = symbol_dir / f"orderbook_{current_hour}.parquet"
+                file_path = symbol_dir / f"{prefix}_{symbol}_{current_date_hour}.parquet"
 
                 table = pa.Table.from_pandas(df, schema=self.schema)
                 del df
@@ -279,7 +280,9 @@ class BaseOrderbookCollector(ABC):
                     existing_table = pq.read_table(file_path)
                     table = pa.concat_tables([existing_table, table])
 
-                pq.write_table(table, file_path, compression='snappy')
+                tmp_path = file_path.with_suffix('.parquet.tmp')
+                pq.write_table(table, tmp_path, compression='snappy')
+                tmp_path.rename(file_path)
                 saved_count += len(records)
                 del table
 
@@ -324,6 +327,7 @@ class BaseOrderbookCollector(ABC):
                         self.ws_connections[symbol].close()
                     except Exception:
                         pass
+                self.reconnect_attempts[symbol] = 0  # 重置计数器，允许健康检查触发的重连
                 self.reconnect_websocket(symbol)
             elif time_since_last_data > 300:  # 5分钟无数据
                 self.logger.warning(f"{symbol} 已 {time_since_last_data:.0f} 秒无数据")

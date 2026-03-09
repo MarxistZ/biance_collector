@@ -1,4 +1,5 @@
 """Binance现货市场Orderbook采集器"""
+import time
 import pyarrow as pa
 from base_orderbook_collector import BaseOrderbookCollector
 from config import DEPTH_LEVEL
@@ -8,12 +9,13 @@ class SpotOrderbookCollector(BaseOrderbookCollector):
     """现货市场Orderbook采集器，处理depth snapshot格式"""
 
     def _build_schema(self):
-        """构建Spot Orderbook Schema (85列)"""
+        """构建Spot Orderbook Schema (86列)"""
         schema_fields = [
             ('timestamp', pa.int64()),
+            ('local_timestamp', pa.int64()),
             ('symbol', pa.string()),
             ('market_type', pa.string()),
-            ('first_update_id', pa.int64()),  # 新增字段
+            ('first_update_id', pa.int64()),
         ]
         # 添加20档bid价格和数量
         for i in range(1, DEPTH_LEVEL + 1):
@@ -48,6 +50,7 @@ class SpotOrderbookCollector(BaseOrderbookCollector):
 
         orderbook_record = {
             "timestamp": timestamp,
+            "local_timestamp": int(time.time() * 1000),
             "symbol": symbol,
             "market_type": self.market_type,
             "first_update_id": first_update_id,

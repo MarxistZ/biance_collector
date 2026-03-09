@@ -90,6 +90,7 @@ start() {
     fi
 
     # Start collector
+    mkdir -p logs
     nohup ./venv/bin/python3 main.py > logs/nohup.log 2>&1 &
     echo $! > collector.pid
 

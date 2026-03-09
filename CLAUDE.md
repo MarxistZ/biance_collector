@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-Binance orderbook实时数据采集系统，采集现货和合约市场的orderbook数据及资金费率，以Parquet格式存储。所有数据使用Binance服务器时间戳。
+Binance orderbook实时数据采集系统，采集现货和合约市场的orderbook数据及资金费率，以Parquet格式存储。所有数据使用Binance服务器时间戳，并同时记录本机接收时间戳。
 
 ## 架构
 
@@ -13,7 +13,6 @@ Binance orderbook实时数据采集系统，采集现货和合约市场的orderb
 - `funding_rate_collector.py`: 资金费率采集器（REST API）
 - `config.py`: 配置文件
 - `logger_config.py`: 日志配置
-- `time_sync.py`: 时间同步
 
 ## 数据流
 
@@ -24,10 +23,10 @@ Binance orderbook实时数据采集系统，采集现货和合约市场的orderb
 
 ```
 data/
-├── spot/{SYMBOL}/{YYYYMMDD}/orderbook_{HH}.parquet
-└── futures/{SYMBOL}/{YYYYMMDD}/
-    ├── orderbook_{HH}.parquet
-    └── funding_rate_{HH}.parquet
+├── spot/{SYMBOL}/spot_{SYMBOL}_{YYYYMMDDHH}.parquet
+└── futures/{SYMBOL}/
+    ├── future_{SYMBOL}_{YYYYMMDDHH}.parquet
+    └── funding_{SYMBOL}_{YYYYMMDDHH}.parquet
 ```
 
 ## 部署
@@ -40,7 +39,7 @@ sudo ./deploy.sh install  # 安装依赖
 
 ## 配置
 
-- 交易对: BTC, ETH, SOL, XRP, DOGE (USDT)
+- 交易对: BTC, ETH, BNB, SOL, XRP, DOGE, AVAX, LINK (USDT)
 - Orderbook深度: 20档
 - 更新频率: WebSocket 100ms, 资金费率 15秒
 - 保存间隔: 10秒
@@ -48,8 +47,8 @@ sudo ./deploy.sh install  # 安装依赖
 
 ## 数据Schema
 
-**Orderbook**: timestamp, symbol, market_type, bid1-20_price/qty, ask1-20_price/qty, last_update_id
-**资金费率**: timestamp, symbol, funding_rate, mark_price, index_price, next_funding_time, open_interest, volume_24h
+**Orderbook**: timestamp, local_timestamp, symbol, market_type, bid1-20_price/qty, ask1-20_price/qty, last_update_id
+**资金费率**: timestamp, local_timestamp, symbol, funding_rate, mark_price, index_price, next_funding_time, open_interest, volume_24h
 
 ## 日志
 
