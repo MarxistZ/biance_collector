@@ -12,3 +12,4 @@ data/
 logs/
 md/
 collector.pid
+target/

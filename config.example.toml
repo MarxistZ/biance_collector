@@ -1,0 +1,12 @@
+# Defaults match the old Python collector.
+symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT"]
+spot_ws_base = "wss://stream.binance.com:9443/ws"
+futures_ws_base = "wss://fstream.binance.com/ws"
+futures_rest_base = "https://fapi.binance.com"
+depth_level = 20
+depth_speed = "100ms"
+funding_poll_interval_secs = 15
+save_interval_secs = 10
+data_dir = "data"
+log_dir = "logs"
+channel_capacity = 10000
