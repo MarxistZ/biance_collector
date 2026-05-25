@@ -108,7 +108,7 @@ This keeps the current single-file hourly format. The tradeoff is that the activ
 
 ## Schemas
 
-Match `raw_data_schema.md`.
+Match `old/raw_data_schema.md`.
 
 Spot order book:
 
@@ -185,7 +185,7 @@ The Rust rewrite is done when:
 
 - It writes the same three dataset types as the Python collector.
 - It uses the same directory and file naming layout.
-- Parquet columns and types match `raw_data_schema.md`.
+- Parquet columns and types match `old/raw_data_schema.md`.
 - It survives WebSocket disconnects and resumes collection.
 - It flushes remaining records on shutdown.
 - It never leaves a final `.parquet` file from a partial write.
